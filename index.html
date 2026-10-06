@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seki Music Player</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="player-card">
+    <div class="cover-container">
+      <img id="coverImg" src="https://via.placeholder.com/300?text=Seki+Music" alt="Cover">
+    </div>
+    <div class="track-info">
+      <h2 id="title">Cargando Seki Player...</h2>
+      <p id="artist">Sincronizando con Supabase</p>
+    </div>
+    <audio id="audioPlayer" controls style="width: 100%; margin-top: 15px;"></audio>
+    <div class="lyrics-box" id="lyricsBox">
+      <p>Letras sincronizadas aparecerán aquí...</p>
+    </div>
+  </div>
+  <script>
+    async function loadPlaylist() {
+      const res = await fetch('/api/songs');
+      const songs = await res.json();
+      if(songs.length > 0) {
+        const song = songs[0];
+        document.getElementById('title').innerText = song.title;
+        document.getElementById('artist').innerText = song.artist;
+        document.getElementById('coverImg').src = song.cover_url || 'https://via.placeholder.com/300?text=No+Cover';
+        document.getElementById('audioPlayer').src = song.audio_url;
+        document.getElementById('lyricsBox').innerText = song.lyrics_text || 'Sin letra disponible.';
+      }
+    }
+    loadPlaylist();
+  </script>
+</body>
+</html>

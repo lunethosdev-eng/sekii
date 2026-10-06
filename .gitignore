@@ -1,3 +1,6 @@
 node_modules/
-temp_*
-*.log
+temp_*.mp3
+temp_*.jpg
+cookies.txt
+.env
+seki.log

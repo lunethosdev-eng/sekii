@@ -1,6 +1,6 @@
 /**
- * Seki API — fix WebSocket crash en Node 20
- * createClient necesita `ws` o Node 22+
+ * Seki API — Servidor Express con Supabase, yt-dlp y metadatos iTunes.
+ * Polyfill de WebSocket para Node < 22 para evitar crasheos en Realtime.
  */
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -30,6 +30,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
 
 app.use(express.json());
 
+// Middleware de Autenticación por Header/Query
 function auth(req, res, next) {
   if (!API_SECRET) return next();
   const key = req.headers['x-api-key'] || req.query.key;
@@ -37,6 +38,7 @@ function auth(req, res, next) {
   next();
 }
 
+// Limpieza de cadenas en títulos
 function cleanTitle(rawTitle) {
   return String(rawTitle || '')
     .replace(/\([\s\S]*?\)/g, '')
@@ -46,6 +48,7 @@ function cleanTitle(rawTitle) {
     .trim();
 }
 
+// Búsqueda de metadatos e imágenes HD en iTunes
 async function fetchiTunesMetadata(artist, title) {
   try {
     const query = encodeURIComponent(`${artist} ${cleanTitle(title)}`);
@@ -83,6 +86,7 @@ async function fetchiTunesMetadata(artist, title) {
   };
 }
 
+// Descarga de audio mediante yt-dlp
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
@@ -106,6 +110,7 @@ function downloadAudio(youtubeUrl, outputPath) {
   });
 }
 
+// Ingesta, etiquetado e inserción en Supabase
 async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   let artist = defaultArtist;
   let title = rawTitle;
@@ -206,6 +211,7 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       .insert([newSong])
       .select()
       .single();
+
     if (dbErr) {
       const minimal = {
         title: cleanSongTitle,
@@ -232,6 +238,7 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   }
 }
 
+// Búsqueda plana en YouTube con yt-dlp
 function ytSearch(query, limit = 1) {
   const n = Math.min(Math.max(limit, 1), 8);
   const cmd = `yt-dlp "ytsearch${n}:${query.replace(/"/g, '')}" --dump-json --flat-playlist --no-download`;
@@ -246,10 +253,23 @@ function ytSearch(query, limit = 1) {
     .filter(Boolean);
 }
 
+// --- Rutas del Servidor ---
+
+// Ruta Raíz
+app.get('/', (_req, res) => {
+  res.json({
+    service: 'seki',
+    ok: true,
+    endpoints: ['/health', '/api/songs', '/api/search?q=']
+  });
+});
+
+// Verificación de salud
 app.get('/health', (_, res) => {
   res.json({ ok: true, service: 'seki', node: process.version, ts: Date.now() });
 });
 
+// Obtener canciones de la base de datos
 app.get('/api/songs', auth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
   const { data, error } = await supabase
@@ -261,6 +281,7 @@ app.get('/api/songs', auth, async (req, res) => {
   res.json({ source: 'database', count: data?.length || 0, results: data || [] });
 });
 
+// Búsqueda (Local -> Descarga bajo demanda)
 app.get('/api/search', auth, async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.status(400).json({ error: 'Parámetro q requerido' });
@@ -297,6 +318,7 @@ app.get('/api/search', auth, async (req, res) => {
   }
 });
 
+// Ingesta asíncrona por artista
 app.post('/api/ingest', auth, async (req, res) => {
   const artist = (req.query.artist || req.body?.artist || '').trim();
   const limit = Math.min(parseInt(req.query.limit || req.body?.limit || '5', 10), 10);
@@ -316,6 +338,7 @@ app.post('/api/ingest', auth, async (req, res) => {
   });
 });
 
+// Keep-alive para despliegues en Render
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_EXTERNAL_URL) {
   setInterval(() => {

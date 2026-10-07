@@ -1,6 +1,8 @@
-node_modules/
-temp_*.mp3
-temp_*.jpg
-cookies.txt
-.env
-seki.log
+temp_*
+*.webm
+*.mp3
+node_modules
+.git
+seki.js
+index.html
+styles.css

@@ -1,15 +1,18 @@
 {
   "name": "seki-music-api",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
+    "@supabase/supabase-js": "^2.49.1",
     "axios": "^1.6.5",
     "express": "^4.18.2",
-    "node-id3": "^0.2.6"
+    "node-id3": "^0.2.6",
+    "ws": "^8.18.0"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=20"
+  }
 }

@@ -155,7 +155,7 @@ async function fetchiTunesMetadata(artist, title) {
         genre: track.primaryGenreName || 'Pop/Urban',
         year: new Date(track.releaseDate).getFullYear() || new Date().getFullYear(),
         coverUrl: coverHd,
-        animatedCoverUrl: null, // Evita enlaces falsos o rotos .m4v
+        animatedCoverUrl: null,
         durationMs: track.trackTimeMillis || 180000
       };
     }
@@ -222,7 +222,7 @@ function downloadAudio(youtubeUrl, outputPath) {
       '-o', outputPath,
       '--no-playlist',
       '--no-warnings',
-      '--extractor-args', 'youtube:player_client=tv,web',
+      '--extractor-args', 'youtube:player_client=ios,web',
       youtubeUrl
     ];
 

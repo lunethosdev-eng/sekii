@@ -84,30 +84,28 @@ async function fetchArtistInfo(artistName) {
   let imageUrl = null;
   let bio = `Artista musical ${artistName}`;
 
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  };
+
   try {
-    // 1. Obtener imagen HD desde iTunes API
     const itunesRes = await axios.get(
       `https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=musicArtist&limit=1`,
-      { timeout: 5000 }
+      { timeout: 5000, headers }
     );
     if (itunesRes.data.results?.length) {
-      const artistData = itunesRes.data.results[0];
-      if (artistData.artistLinkUrl) {
-        // Fallback a Deezer para conseguir foto de alta resolución del artista
-        const deezerRes = await axios.get(
-          `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}`,
-          { timeout: 5000 }
-        );
-        if (deezerRes.data.data?.length) {
-          imageUrl = deezerRes.data.data[0].picture_xl || deezerRes.data.data[0].picture_big;
-        }
+      const deezerRes = await axios.get(
+        `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}`,
+        { timeout: 5000, headers }
+      );
+      if (deezerRes.data.data?.length) {
+        imageUrl = deezerRes.data.data[0].picture_xl || deezerRes.data.data[0].picture_big;
       }
     }
 
-    // 2. Obtener resumen de Biografía desde Wikipedia API
     const wikiRes = await axios.get(
       `https://es.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(artistName)}`,
-      { timeout: 5000 }
+      { timeout: 5000, headers }
     );
     if (wikiRes.data && wikiRes.data.extract) {
       bio = wikiRes.data.extract;
@@ -116,7 +114,6 @@ async function fetchArtistInfo(artistName) {
     console.warn(`⚠️ [ARTIST SCRAPER] Aviso: ${e.message}`);
   }
 
-  // Si se encontró imagen, guardarla/actualizarla en la tabla "artists" de Supabase
   if (imageUrl) {
     try {
       await supabase.from('artists').upsert({
@@ -224,7 +221,7 @@ function downloadAudio(youtubeUrl, outputPath) {
       '-o', outputPath,
       '--no-playlist',
       '--no-warnings',
-      '--prefer-ffmpeg',
+      '--extractor-args', 'youtube:player_client=android,web',
       youtubeUrl
     ];
 
@@ -266,7 +263,6 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   const cleanSongTitle = cleanTitle(title);
   console.log(`🎬 [Procesando Canción] ID: ${youtubeId} | Título: "${cleanSongTitle}" | Artista: "${artist}"`);
 
-  // Extraer/Guardar también información e imagen del artista
   fetchArtistInfo(artist).catch(() => {});
 
   const tempMp3 = path.join('/tmp', `seki_${youtubeId}.mp3`);
@@ -404,7 +400,6 @@ async function checkForNewReleases() {
           console.log(`🚀 [RELEASE BOT DETECTED] ¡Nueva canción encontrada para ${artist}!: ${latest.title}`);
           const newSong = await processAndUploadSong(latest.id, latest.title, artist);
 
-          // Registrar la notificación en Supabase para que la App Cliente la reciba en tiempo real
           if (newSong) {
             await supabase.from('notifications').insert([{
               artist_name: artist,
@@ -422,7 +417,6 @@ async function checkForNewReleases() {
   }
 }
 
-// Ejecutar el bot automáticamente cada 10 minutos
 setInterval(checkForNewReleases, 10 * 60 * 1000);
 
 // --- RUTAS API ---
@@ -486,7 +480,6 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'downloaded_on_demand', results: [song] });
     }
 
-    // Búsqueda por Texto
     const { data: existing } = await supabase
       .from('songs')
       .select('*')
@@ -517,6 +510,5 @@ app.get('/api/search', auth, async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`🚀 Seki API escuchando en el puerto ${PORT}`);
-  // Ejecutar primera pasada del bot tras arrancar
   setTimeout(checkForNewReleases, 5000);
 });

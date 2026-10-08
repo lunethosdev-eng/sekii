@@ -1,10 +1,10 @@
 /**
- * Seki API — Servidor Express con Supabase, yt-dlp y metadatos iTunes.
+ * Seki API — Servidor Express con Supabase, YouTube Data API v3, yt-dlp y metadatos iTunes.
  * Polyfill de WebSocket para Node < 22 para evitar crasheos en Realtime.
  */
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -22,6 +22,9 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://esjoifsjljvymttinyhj.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || '';
 const API_SECRET = process.env.API_SECRET || '';
+
+// Se recomienda configurar YOUTUBE_API_KEY en las variables de entorno de Render/Servidor
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCYxGyZOLyOC9fD5PTTCVuuQ0xM1QTKido';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -95,7 +98,50 @@ async function fetchiTunesMetadata(artist, title) {
   };
 }
 
-// Descarga de audio mediante yt-dlp
+// Búsqueda en YouTube mediante la API v3 oficial (Rápido y sin riesgo de error 429)
+async function ytApiSearch(query, limit = 1) {
+  const n = Math.min(Math.max(limit, 1), 10);
+  if (!YOUTUBE_API_KEY) {
+    console.warn('[YouTube API] No hay YOUTUBE_API_KEY configurada.');
+    return [];
+  }
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q=${encodeURIComponent(query)}&maxResults=${n}&key=${YOUTUBE_API_KEY}`;
+    const res = await axios.get(url, { timeout: 8000 });
+    if (res.data.items?.length) {
+      return res.data.items.map((item) => ({
+        id: item.id.videoId,
+        title: item.snippet.title,
+        uploader: item.snippet.channelTitle
+      }));
+    }
+  } catch (err) {
+    console.error('[YouTube API Search Error]:', err.response?.data?.error?.message || err.message);
+  }
+  return [];
+}
+
+// Obtener metadatos de un video de YouTube por su ID mediante la API v3
+async function getVideoDetails(videoId) {
+  if (!YOUTUBE_API_KEY) return null;
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`;
+    const res = await axios.get(url, { timeout: 8000 });
+    if (res.data.items?.length) {
+      const snippet = res.data.items[0].snippet;
+      return {
+        id: videoId,
+        title: snippet.title,
+        uploader: snippet.channelTitle
+      };
+    }
+  } catch (err) {
+    console.error('[YouTube API VideoDetails Error]:', err.response?.data?.error?.message || err.message);
+  }
+  return null;
+}
+
+// Descarga de audio mediante yt-dlp (Único punto donde se invoca el binario)
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
@@ -247,21 +293,6 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   }
 }
 
-// Búsqueda plana en YouTube con yt-dlp
-function ytSearch(query, limit = 1) {
-  const n = Math.min(Math.max(limit, 1), 8);
-  const cmd = `yt-dlp "ytsearch${n}:${query.replace(/"/g, '')}" --dump-json --flat-playlist --no-download`;
-  const stdout = execSync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 60000 }).toString().trim();
-  if (!stdout) return [];
-  return stdout
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      try { return JSON.parse(line); } catch { return null; }
-    })
-    .filter(Boolean);
-}
-
 // --- Rutas del Servidor ---
 
 // Ruta Raíz
@@ -311,24 +342,18 @@ app.get('/api/search', auth, async (req, res) => {
         return res.json({ source: 'database', results: [existing] });
       }
 
-      // 2. Si no existe, obtener metadatos directos del enlace con yt-dlp
+      // 2. Si no existe, obtener metadatos desde la API de YouTube v3
       console.log(`[on-demand link] ${ytId}`);
-      const cookiesPath = path.join(__dirname, 'cookies.txt');
-      let cmd = `yt-dlp "https://www.youtube.com/watch?v=${ytId}" --dump-json --no-download`;
-      if (fs.existsSync(cookiesPath)) {
-        cmd += ` --cookies "${cookiesPath}"`;
+      const info = await getVideoDetails(ytId);
+
+      if (!info) {
+        return res.status(404).json({ error: 'No se pudo obtener datos del enlace desde la API de YouTube', results: [] });
       }
 
-      const stdout = execSync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 60000 }).toString().trim();
-      if (!stdout) {
-        return res.status(404).json({ error: 'No se pudo obtener datos del enlace', results: [] });
-      }
-
-      const info = JSON.parse(stdout);
       const song = await processAndUploadSong(
         ytId,
         info.title || 'Unknown',
-        info.uploader || info.channel || 'Artista'
+        info.uploader || 'Artista'
       );
 
       if (!song) {
@@ -348,8 +373,8 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'database', results: existing });
     }
 
-    console.log(`[on-demand text search] ${query}`);
-    const videos = ytSearch(query, 1);
+    console.log(`[on-demand text search API] ${query}`);
+    const videos = await ytApiSearch(query, 1);
     if (!videos.length) {
       return res.status(404).json({ error: 'Sin resultados', results: [] });
     }
@@ -357,7 +382,7 @@ app.get('/api/search', auth, async (req, res) => {
     const song = await processAndUploadSong(
       v.id,
       v.title || query,
-      v.uploader || v.channel || 'Artista'
+      v.uploader || 'Artista'
     );
     if (!song) {
       return res.status(500).json({ error: 'No se pudo procesar', results: [] });
@@ -377,7 +402,7 @@ app.post('/api/ingest', auth, async (req, res) => {
   res.json({ status: 'started', artist, limit });
   setImmediate(async () => {
     try {
-      const videos = ytSearch(`${artist} official audio`, limit);
+      const videos = await ytApiSearch(`${artist} official audio`, limit);
       for (const v of videos) {
         await processAndUploadSong(v.id, v.title || artist, artist);
         await new Promise((r) => setTimeout(r, 2500));

@@ -155,7 +155,7 @@ async function fetchiTunesMetadata(artist, title) {
         genre: track.primaryGenreName || 'Pop/Urban',
         year: new Date(track.releaseDate).getFullYear() || new Date().getFullYear(),
         coverUrl: coverHd,
-        animatedCoverUrl: coverHd ? coverHd.replace(/\.jpg$/, '.m4v') : null,
+        animatedCoverUrl: null, // Evita enlaces falsos o rotos .m4v
         durationMs: track.trackTimeMillis || 180000
       };
     }

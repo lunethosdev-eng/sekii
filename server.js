@@ -44,8 +44,17 @@ function auth(req, res, next) {
 // Extractor de ID de YouTube (Links o ID de 11 caracteres)
 function extractYoutubeId(input) {
   const str = String(input || '').trim();
-  const match = str.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-  if (match) return match[1];
+  if (!str) return null;
+  // Full URLs (watch, youtu.be, embed, shorts, music, live)
+  const patterns = [
+    /(?:youtube\.com\/(?:watch\?.*?v=|embed\/|v\/|shorts\/|live\/)|youtu\.be\/|music\.youtube\.com\/watch\?.*?v=)([\w-]{11})/i,
+    /[?&]v=([\w-]{11})/i,
+    /(?:^|[^\w-])([\w-]{11})(?:$|[^\w-])/
+  ];
+  for (const re of patterns) {
+    const m = str.match(re);
+    if (m && m[1] && /^[\w-]{11}$/.test(m[1])) return m[1];
+  }
   if (/^[\w-]{11}$/.test(str)) return str;
   return null;
 }
@@ -145,22 +154,54 @@ async function getVideoDetails(videoId) {
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
+    // yt-dlp adds extension when using %(ext)s; strip .mp3 from base if present
+    const base = outputPath.replace(/\.mp3$/i, '');
+    const outTemplate = base + '.%(ext)s';
     const args = [
+      '-f', 'bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
-      '-o', outputPath,
+      '-o', outTemplate,
       '--no-playlist',
-      '--match-filter', 'duration > 45',
+      '--no-warnings',
+      '--prefer-ffmpeg',
       youtubeUrl
     ];
-    if (fs.existsSync(cookiesPath)) args.push('--cookies', cookiesPath);
+    // Only use cookies if file exists and has content
+    try {
+      if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 50) {
+        args.push('--cookies', cookiesPath);
+      }
+    } catch (_) {}
+    console.log('[yt-dlp]', args.join(' '));
     const child = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
+    let out = '';
+    child.stdout.on('data', (d) => { out += d.toString(); });
     child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => reject(new Error(`yt-dlp no disponible: ${e.message}`)));
     child.on('close', (code) => {
-      if (code === 0) resolve(true);
-      else reject(new Error(`yt-dlp ${code}: ${err.slice(-300)}`));
+      // Normalize final path to the expected .mp3
+      const candidates = [
+        outputPath,
+        base + '.mp3',
+        base + '.m4a',
+        base + '.webm',
+        base + '.opus'
+      ];
+      const found = candidates.find((p) => fs.existsSync(p));
+      if (code === 0 && found) {
+        if (found !== outputPath && found.endsWith('.mp3')) {
+          try { fs.renameSync(found, outputPath); } catch (_) {}
+        } else if (found !== outputPath) {
+          // Non-mp3: leave as-is and let caller check outputPath; try copy name
+          try { fs.copyFileSync(found, outputPath); } catch (_) {}
+        }
+        if (fs.existsSync(outputPath)) return resolve(true);
+      }
+      const tail = (err || out).slice(-500);
+      reject(new Error(`yt-dlp ${code}: ${tail}`));
     });
   });
 }
@@ -357,7 +398,7 @@ app.get('/api/search', auth, async (req, res) => {
       );
 
       if (!song) {
-        return res.status(500).json({ error: 'No se pudo procesar el enlace', results: [] });
+        return res.status(500).json({ error: 'No se pudo procesar el enlace (yt-dlp o storage falló). Revisa logs del servidor.', results: [] });
       }
       return res.json({ source: 'downloaded_on_demand', results: [song] });
     }
@@ -385,7 +426,7 @@ app.get('/api/search', auth, async (req, res) => {
       v.uploader || 'Artista'
     );
     if (!song) {
-      return res.status(500).json({ error: 'No se pudo procesar', results: [] });
+      return res.status(500).json({ error: 'No se pudo procesar (yt-dlp o storage falló). Revisa logs del servidor.', results: [] });
     }
     return res.json({ source: 'downloaded_on_demand', results: [song] });
   } catch (err) {

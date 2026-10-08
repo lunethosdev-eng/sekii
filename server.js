@@ -38,6 +38,15 @@ function auth(req, res, next) {
   next();
 }
 
+// Extractor de ID de YouTube (Links o ID de 11 caracteres)
+function extractYoutubeId(input) {
+  const str = String(input || '').trim();
+  const match = str.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+  if (match) return match[1];
+  if (/^[\w-]{11}$/.test(str)) return str;
+  return null;
+}
+
 // Limpieza de cadenas en títulos
 function cleanTitle(rawTitle) {
   return String(rawTitle || '')
@@ -281,12 +290,54 @@ app.get('/api/songs', auth, async (req, res) => {
   res.json({ source: 'database', count: data?.length || 0, results: data || [] });
 });
 
-// Búsqueda (Local -> Descarga bajo demanda)
+// Búsqueda (Texto o Enlace directo -> Descarga bajo demanda)
 app.get('/api/search', auth, async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.status(400).json({ error: 'Parámetro q requerido' });
 
   try {
+    const ytId = extractYoutubeId(query);
+
+    // --- CASO 1: Si se proporcionó un enlace o ID directo de YouTube ---
+    if (ytId) {
+      // 1. Verificar si el video ya existe en Supabase por youtube_id
+      const { data: existing } = await supabase
+        .from('songs')
+        .select('*')
+        .eq('youtube_id', ytId)
+        .maybeSingle();
+
+      if (existing) {
+        return res.json({ source: 'database', results: [existing] });
+      }
+
+      // 2. Si no existe, obtener metadatos directos del enlace con yt-dlp
+      console.log(`[on-demand link] ${ytId}`);
+      const cookiesPath = path.join(__dirname, 'cookies.txt');
+      let cmd = `yt-dlp "https://www.youtube.com/watch?v=${ytId}" --dump-json --no-download`;
+      if (fs.existsSync(cookiesPath)) {
+        cmd += ` --cookies "${cookiesPath}"`;
+      }
+
+      const stdout = execSync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 60000 }).toString().trim();
+      if (!stdout) {
+        return res.status(404).json({ error: 'No se pudo obtener datos del enlace', results: [] });
+      }
+
+      const info = JSON.parse(stdout);
+      const song = await processAndUploadSong(
+        ytId,
+        info.title || 'Unknown',
+        info.uploader || info.channel || 'Artista'
+      );
+
+      if (!song) {
+        return res.status(500).json({ error: 'No se pudo procesar el enlace', results: [] });
+      }
+      return res.json({ source: 'downloaded_on_demand', results: [song] });
+    }
+
+    // --- CASO 2: Búsqueda por texto tradicional ---
     const { data: existing } = await supabase
       .from('songs')
       .select('*')
@@ -297,7 +348,7 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'database', results: existing });
     }
 
-    console.log(`[on-demand] ${query}`);
+    console.log(`[on-demand text search] ${query}`);
     const videos = ytSearch(query, 1);
     if (!videos.length) {
       return res.status(404).json({ error: 'Sin resultados', results: [] });
@@ -313,7 +364,7 @@ app.get('/api/search', auth, async (req, res) => {
     }
     return res.json({ source: 'downloaded_on_demand', results: [song] });
   } catch (err) {
-    console.error(err);
+    console.error('search error:', err.message || err);
     res.status(500).json({ error: err.message, results: [] });
   }
 });

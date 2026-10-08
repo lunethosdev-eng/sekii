@@ -215,7 +215,7 @@ function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
     const args = [
-      '-f', 'bestaudio/best',
+      '-f', 'ba[ext=m4a]/b/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
@@ -495,7 +495,7 @@ app.get('/api/search', auth, async (req, res) => {
     if (!videos.length) {
       return res.status(404).json({ error: 'Sin resultados', results: [] });
     }
-    const v = videos[0];
+    const v = videos.shift();
     const song = await processAndUploadSong(v.id, v.title || query, v.uploader || 'Artista');
 
     if (!song) {

@@ -1,6 +1,5 @@
 /**
- * Seki API — Servidor Express con Supabase, YouTube Data API v3, yt-dlp y metadatos iTunes.
- * Polyfill de WebSocket para Node < 22 para evitar crasheos en Realtime.
+ * Seki API v2.0 — Servidor Express + Supabase + YouTube API v3 + Bot de Nuevos Lanzamientos
  */
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -10,7 +9,7 @@ const path = require('path');
 const axios = require('axios');
 const NodeID3 = require('node-id3');
 
-// Polyfill WebSocket para @supabase/realtime-js en Node < 22
+// Polyfill WebSocket para Node < 22
 const ws = require('ws');
 if (!globalThis.WebSocket) {
   globalThis.WebSocket = ws.WebSocket || ws;
@@ -22,7 +21,6 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://esjoifsjljvymttinyhj.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || '';
 const API_SECRET = process.env.API_SECRET || '';
-
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCYxGyZOLyOC9fD5PTTCVuuQ0xM1QTKido';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
@@ -32,11 +30,25 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
 
 app.use(express.json());
 
-// Middleware de Autenticación por Header/Query
+// Middleware con Logging en Terminal para el Cliente
+app.use((req, res, next) => {
+  const start = Date.now();
+  console.log(`\n📥 [REQUEST] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`📤 [RESPONSE] ${req.method} ${req.originalUrl} -> Status: ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
+
+// Middleware de Autenticación
 function auth(req, res, next) {
   if (!API_SECRET) return next();
   const key = req.headers['x-api-key'] || req.query.key;
-  if (key !== API_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  if (key !== API_SECRET) {
+    console.warn('⚠️ [AUTH] Clave API inválida o no proporcionada.');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
   next();
 }
 
@@ -57,7 +69,6 @@ function extractYoutubeId(input) {
   return null;
 }
 
-// Limpieza de cadenas en títulos
 function cleanTitle(rawTitle) {
   return String(rawTitle || '')
     .replace(/\([\s\S]*?\)/g, '')
@@ -67,7 +78,63 @@ function cleanTitle(rawTitle) {
     .trim();
 }
 
-// Búsqueda de metadatos e imágenes HD en iTunes
+// --- SCRAPER DE ARTISTAS (Foto + Biografía) ---
+async function fetchArtistInfo(artistName) {
+  console.log(`🔍 [ARTIST SCRAPER] Buscando información e imagen de: "${artistName}"`);
+  let imageUrl = null;
+  let bio = `Artista musical ${artistName}`;
+
+  try {
+    // 1. Obtener imagen HD desde iTunes API
+    const itunesRes = await axios.get(
+      `https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=musicArtist&limit=1`,
+      { timeout: 5000 }
+    );
+    if (itunesRes.data.results?.length) {
+      const artistData = itunesRes.data.results[0];
+      if (artistData.artistLinkUrl) {
+        // Fallback a Deezer para conseguir foto de alta resolución del artista
+        const deezerRes = await axios.get(
+          `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}`,
+          { timeout: 5000 }
+        );
+        if (deezerRes.data.data?.length) {
+          imageUrl = deezerRes.data.data[0].picture_xl || deezerRes.data.data[0].picture_big;
+        }
+      }
+    }
+
+    // 2. Obtener resumen de Biografía desde Wikipedia API
+    const wikiRes = await axios.get(
+      `https://es.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(artistName)}`,
+      { timeout: 5000 }
+    );
+    if (wikiRes.data && wikiRes.data.extract) {
+      bio = wikiRes.data.extract;
+    }
+  } catch (e) {
+    console.warn(`⚠️ [ARTIST SCRAPER] Aviso: ${e.message}`);
+  }
+
+  // Si se encontró imagen, guardarla/actualizarla en la tabla "artists" de Supabase
+  if (imageUrl) {
+    try {
+      await supabase.from('artists').upsert({
+        name: artistName,
+        image_url: imageUrl,
+        bio: bio,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'name' });
+      console.log(`✅ [ARTIST SCRAPER] Artista guardado/actualizado en DB: ${artistName}`);
+    } catch (err) {
+      console.error(`❌ [ARTIST SCRAPER] Error guardando artista en Supabase:`, err.message);
+    }
+  }
+
+  return { artistName, imageUrl, bio };
+}
+
+// Metadatos de canciones desde iTunes
 async function fetchiTunesMetadata(artist, title) {
   try {
     const query = encodeURIComponent(`${artist} ${cleanTitle(title)}`);
@@ -107,15 +174,13 @@ async function fetchiTunesMetadata(artist, title) {
   };
 }
 
-// Búsqueda en YouTube mediante la API v3 oficial
 async function ytApiSearch(query, limit = 1) {
-  const n = Math.min(Math.max(limit, 1), 10);
   if (!YOUTUBE_API_KEY) {
-    console.warn('[YouTube API] No hay YOUTUBE_API_KEY configurada.');
+    console.warn('⚠️ [YouTube API] YOUTUBE_API_KEY no encontrada.');
     return [];
   }
   try {
-    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q=${encodeURIComponent(query)}&maxResults=${n}&key=${YOUTUBE_API_KEY}`;
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&q=${encodeURIComponent(query)}&maxResults=${limit}&key=${YOUTUBE_API_KEY}`;
     const res = await axios.get(url, { timeout: 8000 });
     if (res.data.items?.length) {
       return res.data.items.map((item) => ({
@@ -125,12 +190,11 @@ async function ytApiSearch(query, limit = 1) {
       }));
     }
   } catch (err) {
-    console.error('[YouTube API Search Error]:', err.response?.data?.error?.message || err.message);
+    console.error('❌ [YouTube API Search Error]:', err.response?.data?.error?.message || err.message);
   }
   return [];
 }
 
-// Obtener metadatos de un video por ID
 async function getVideoDetails(videoId) {
   if (!YOUTUBE_API_KEY) return null;
   try {
@@ -145,12 +209,11 @@ async function getVideoDetails(videoId) {
       };
     }
   } catch (err) {
-    console.error('[YouTube API VideoDetails Error]:', err.response?.data?.error?.message || err.message);
+    console.error('❌ [YouTube API VideoDetails Error]:', err.response?.data?.error?.message || err.message);
   }
   return null;
 }
 
-// Descarga de audio mediante yt-dlp
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
@@ -169,7 +232,7 @@ function downloadAudio(youtubeUrl, outputPath) {
       args.push('--cookies', cookiesPath);
     }
 
-    console.log('[yt-dlp]', args.join(' '));
+    console.log('⚙️ [yt-dlp Executing]:', args.join(' '));
     const child = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
     let out = '';
@@ -181,12 +244,11 @@ function downloadAudio(youtubeUrl, outputPath) {
         return resolve(true);
       }
       const tail = (err || out).slice(-500);
-      reject(new Error(`yt-dlp exit ${code}: ${tail}`));
+      reject(new Error(`yt-dlp falló con código ${code}: ${tail}`));
     });
   });
 }
 
-// Ingesta, etiquetado e inserción en Supabase
 async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   let artist = defaultArtist;
   let title = rawTitle;
@@ -202,6 +264,11 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   }
 
   const cleanSongTitle = cleanTitle(title);
+  console.log(`🎬 [Procesando Canción] ID: ${youtubeId} | Título: "${cleanSongTitle}" | Artista: "${artist}"`);
+
+  // Extraer/Guardar también información e imagen del artista
+  fetchArtistInfo(artist).catch(() => {});
+
   const tempMp3 = path.join('/tmp', `seki_${youtubeId}.mp3`);
   const tempCover = path.join('/tmp', `seki_${youtubeId}.jpg`);
 
@@ -211,13 +278,13 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       .select('*')
       .eq('youtube_id', youtubeId)
       .maybeSingle();
-    if (byYt) return byYt;
+
+    if (byYt) {
+      console.log(`ℹ️ [DB] Canción ya existe en Supabase: ${cleanSongTitle}`);
+      return byYt;
+    }
 
     await downloadAudio(`https://www.youtube.com/watch?v=${youtubeId}`, tempMp3);
-    if (!fs.existsSync(tempMp3)) {
-      console.error(`[Process Error] El archivo ${tempMp3} no existe tras la descarga.`);
-      return null;
-    }
 
     const meta = await fetchiTunesMetadata(artist, cleanSongTitle);
     let coverBuffer = null;
@@ -233,30 +300,29 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       } catch (_) {}
     }
 
-    NodeID3.write(
-      {
-        title: cleanSongTitle,
-        artist,
-        album: meta.album,
-        year: String(meta.year),
-        image: coverBuffer
-          ? {
-              mime: 'image/jpeg',
-              type: { id: 3, name: 'front cover' },
-              description: 'Cover',
-              imageBuffer: coverBuffer
-            }
-          : undefined
-      },
-      tempMp3
-    );
+    NodeID3.write({
+      title: cleanSongTitle,
+      artist,
+      album: meta.album,
+      year: String(meta.year),
+      image: coverBuffer ? {
+        mime: 'image/jpeg',
+        type: { id: 3, name: 'front cover' },
+        description: 'Cover',
+        imageBuffer: coverBuffer
+      } : undefined
+    }, tempMp3);
 
+    console.log('☁️ [Supabase] Subiendo audio a Storage...');
     const mp3Buffer = fs.readFileSync(tempMp3);
     const { error: uploadAudioErr } = await supabase.storage
       .from('audio')
       .upload(`${youtubeId}.mp3`, mp3Buffer, { contentType: 'audio/mpeg', upsert: true });
 
-    if (uploadAudioErr) throw uploadAudioErr;
+    if (uploadAudioErr) {
+      console.error('❌ [Supabase Storage Error Audio]:', uploadAudioErr.message);
+      throw uploadAudioErr;
+    }
 
     const { data: audioUrlData } = supabase.storage
       .from('audio')
@@ -280,8 +346,6 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
     }
 
     const durationSec = meta.durationMs ? Math.round(meta.durationMs / 1000) : 180;
-    
-    // Objeto identico al esquema utilizado en seki.js
     const newSong = {
       youtube_id: youtubeId,
       isrc: meta.isrc,
@@ -305,13 +369,14 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       .single();
 
     if (dbErr) {
-      console.error('[DB Insert Error]:', dbErr);
+      console.error('❌ [Supabase DB Insert Error]:', dbErr.message);
       throw dbErr;
     }
 
+    console.log(`✅ [EXITO] Canción procesada y publicada en DB: ${cleanSongTitle}`);
     return inserted;
   } catch (err) {
-    console.error('processAndUploadSong catch:', err.message || err);
+    console.error('❌ [processAndUploadSong ERROR]:', err.message || err);
     return null;
   } finally {
     try { if (fs.existsSync(tempMp3)) fs.unlinkSync(tempMp3); } catch (_) {}
@@ -319,18 +384,55 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   }
 }
 
-// --- Rutas del Servidor ---
+// --- BOT AUTOMÁTICO DE DETECCIÓN DE NUEVOS LANZAMIENTOS ---
+const TRACKED_ARTISTS = ['Bad Bunny', 'Laufey', 'Grupo Frontera', 'Eve', 'Taylor Swift', 'H.E.R.'];
+
+async function checkForNewReleases() {
+  console.log('🤖 [RELEASE BOT] Comprobando si hay nuevas canciones subidas por tus artistas...');
+  for (const artist of TRACKED_ARTISTS) {
+    try {
+      const videos = await ytApiSearch(`${artist} official audio`, 1);
+      if (videos.length) {
+        const latest = videos[0];
+        const { data: existing } = await supabase
+          .from('songs')
+          .select('id')
+          .eq('youtube_id', latest.id)
+          .maybeSingle();
+
+        if (!existing) {
+          console.log(`🚀 [RELEASE BOT DETECTED] ¡Nueva canción encontrada para ${artist}!: ${latest.title}`);
+          const newSong = await processAndUploadSong(latest.id, latest.title, artist);
+
+          // Registrar la notificación en Supabase para que la App Cliente la reciba en tiempo real
+          if (newSong) {
+            await supabase.from('notifications').insert([{
+              artist_name: artist,
+              song_id: newSong.id,
+              message: `¡${artist} acaba de lanzar un nuevo tema: "${newSong.title}"!`,
+              created_at: new Date().toISOString()
+            }]);
+            console.log(`📲 [NOTIFICATION SENT] Notificación registrada en DB para el cliente.`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`⚠️ [RELEASE BOT ERROR] Falló la verificación de ${artist}:`, e.message);
+    }
+  }
+}
+
+// Ejecutar el bot automáticamente cada 10 minutos
+setInterval(checkForNewReleases, 10 * 60 * 1000);
+
+// --- RUTAS API ---
 
 app.get('/', (_req, res) => {
-  res.json({
-    service: 'seki',
-    ok: true,
-    endpoints: ['/health', '/api/songs', '/api/search?q=']
-  });
+  res.json({ service: 'seki-api', status: 'online', timestamp: new Date().toISOString() });
 });
 
 app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'seki', node: process.version, ts: Date.now() });
+  res.json({ ok: true, node: process.version, uptime: process.uptime() });
 });
 
 app.get('/api/songs', auth, async (req, res) => {
@@ -340,18 +442,22 @@ app.get('/api/songs', auth, async (req, res) => {
     .select('*')
     .order('created_at', { ascending: false })
     .limit(limit);
+
   if (error) return res.status(500).json({ error: error.message });
   res.json({ source: 'database', count: data?.length || 0, results: data || [] });
 });
 
 app.get('/api/search', auth, async (req, res) => {
   const query = (req.query.q || '').trim();
+  console.log(`🔎 [FETCH CLIENT /api/search] Búsqueda recibida: "${query}"`);
+
   if (!query) return res.status(400).json({ error: 'Parámetro q requerido' });
 
   try {
     const ytId = extractYoutubeId(query);
 
     if (ytId) {
+      console.log(`🔗 [LINK DETECTED] Procesando ID de YouTube: ${ytId}`);
       const { data: existing } = await supabase
         .from('songs')
         .select('*')
@@ -359,12 +465,11 @@ app.get('/api/search', auth, async (req, res) => {
         .maybeSingle();
 
       if (existing) {
+        console.log(`✅ [FOUND IN DB] Retornando de Supabase ID: ${ytId}`);
         return res.json({ source: 'database', results: [existing] });
       }
 
-      console.log(`[on-demand link] ${ytId}`);
       const info = await getVideoDetails(ytId);
-
       if (!info) {
         return res.status(404).json({ error: 'No se pudo obtener datos del enlace desde la API de YouTube', results: [] });
       }
@@ -381,6 +486,7 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'downloaded_on_demand', results: [song] });
     }
 
+    // Búsqueda por Texto
     const { data: existing } = await supabase
       .from('songs')
       .select('*')
@@ -391,53 +497,26 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'database', results: existing });
     }
 
-    console.log(`[on-demand text search API] ${query}`);
     const videos = await ytApiSearch(query, 1);
     if (!videos.length) {
       return res.status(404).json({ error: 'Sin resultados', results: [] });
     }
     const v = videos[0];
-    const song = await processAndUploadSong(
-      v.id,
-      v.title || query,
-      v.uploader || 'Artista'
-    );
+    const song = await processAndUploadSong(v.id, v.title || query, v.uploader || 'Artista');
+
     if (!song) {
       return res.status(500).json({ error: 'No se pudo procesar (yt-dlp o storage falló). Revisa logs del servidor.', results: [] });
     }
     return res.json({ source: 'downloaded_on_demand', results: [song] });
+
   } catch (err) {
-    console.error('search error:', err.message || err);
+    console.error('❌ [Search Route Error]:', err.message || err);
     res.status(500).json({ error: err.message, results: [] });
   }
 });
 
-app.post('/api/ingest', auth, async (req, res) => {
-  const artist = (req.query.artist || req.body?.artist || '').trim();
-  const limit = Math.min(parseInt(req.query.limit || req.body?.limit || '5', 10), 10);
-  if (!artist) return res.status(400).json({ error: 'artist requerido' });
-  res.json({ status: 'started', artist, limit });
-  setImmediate(async () => {
-    try {
-      const videos = await ytApiSearch(`${artist} official audio`, limit);
-      for (const v of videos) {
-        await processAndUploadSong(v.id, v.title || artist, artist);
-        await new Promise((r) => setTimeout(r, 2500));
-      }
-      console.log(`[ingest] done ${artist}`);
-    } catch (e) {
-      console.error('[ingest]', e.message);
-    }
-  });
-});
-
-const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
-if (RENDER_EXTERNAL_URL) {
-  setInterval(() => {
-    axios.get(RENDER_EXTERNAL_URL + '/health').catch(() => {});
-  }, 10 * 60 * 1000);
-}
-
 app.listen(PORT, () => {
-  console.log(`Seki API :${PORT} node=${process.version}`);
+  console.log(`🚀 Seki API escuchando en el puerto ${PORT}`);
+  // Ejecutar primera pasada del bot tras arrancar
+  setTimeout(checkForNewReleases, 5000);
 });

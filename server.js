@@ -215,13 +215,14 @@ function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
     const args = [
+      '-f', 'ba/b/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
       '-o', outputPath,
       '--no-playlist',
       '--no-warnings',
-      '--extractor-args', 'youtube:player_client=android,web',
+      '--extractor-args', 'youtube:player_client=android,ios',
       youtubeUrl
     ];
 

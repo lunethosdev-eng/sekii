@@ -23,7 +23,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://esjoifsjljvymttinyhj.s
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || '';
 const API_SECRET = process.env.API_SECRET || '';
 
-// Se recomienda configurar YOUTUBE_API_KEY en las variables de entorno de Render/Servidor
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCYxGyZOLyOC9fD5PTTCVuuQ0xM1QTKido';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
@@ -41,11 +40,10 @@ function auth(req, res, next) {
   next();
 }
 
-// Extractor de ID de YouTube (Links o ID de 11 caracteres)
+// Extractor de ID de YouTube
 function extractYoutubeId(input) {
   const str = String(input || '').trim();
   if (!str) return null;
-  // Full URLs (watch, youtu.be, embed, shorts, music, live)
   const patterns = [
     /(?:youtube\.com\/(?:watch\?.*?v=|embed\/|v\/|shorts\/|live\/)|youtu\.be\/|music\.youtube\.com\/watch\?.*?v=)([\w-]{11})/i,
     /[?&]v=([\w-]{11})/i,
@@ -90,24 +88,26 @@ async function fetchiTunesMetadata(artist, title) {
       return {
         isrc: track.isrc || null,
         album: track.collectionName || 'Single',
-        genre: track.primaryGenreName || 'Pop',
+        genre: track.primaryGenreName || 'Pop/Urban',
         year: new Date(track.releaseDate).getFullYear() || new Date().getFullYear(),
         coverUrl: coverHd,
-        durationMs: track.trackTimeMillis || 0
+        animatedCoverUrl: coverHd ? coverHd.replace(/\.jpg$/, '.m4v') : null,
+        durationMs: track.trackTimeMillis || 180000
       };
     }
   } catch (_) {}
   return {
     isrc: null,
     album: 'Single',
-    genre: 'Pop',
+    genre: 'Latin/Urban',
     year: new Date().getFullYear(),
     coverUrl: null,
-    durationMs: 0
+    animatedCoverUrl: null,
+    durationMs: 180000
   };
 }
 
-// Búsqueda en YouTube mediante la API v3 oficial (Rápido y sin riesgo de error 429)
+// Búsqueda en YouTube mediante la API v3 oficial
 async function ytApiSearch(query, limit = 1) {
   const n = Math.min(Math.max(limit, 1), 10);
   if (!YOUTUBE_API_KEY) {
@@ -130,7 +130,7 @@ async function ytApiSearch(query, limit = 1) {
   return [];
 }
 
-// Obtener metadatos de un video de YouTube por su ID mediante la API v3
+// Obtener metadatos de un video por ID
 async function getVideoDetails(videoId) {
   if (!YOUTUBE_API_KEY) return null;
   try {
@@ -150,30 +150,25 @@ async function getVideoDetails(videoId) {
   return null;
 }
 
-// Descarga de audio mediante yt-dlp (Único punto donde se invoca el binario)
+// Descarga de audio mediante yt-dlp
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
     const cookiesPath = path.join(__dirname, 'cookies.txt');
-    // yt-dlp adds extension when using %(ext)s; strip .mp3 from base if present
-    const base = outputPath.replace(/\.mp3$/i, '');
-    const outTemplate = base + '.%(ext)s';
     const args = [
-      '-f', 'bestaudio/best',
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
-      '-o', outTemplate,
+      '-o', outputPath,
       '--no-playlist',
       '--no-warnings',
       '--prefer-ffmpeg',
       youtubeUrl
     ];
-    // Only use cookies if file exists and has content
-    try {
-      if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 50) {
-        args.push('--cookies', cookiesPath);
-      }
-    } catch (_) {}
+
+    if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 10) {
+      args.push('--cookies', cookiesPath);
+    }
+
     console.log('[yt-dlp]', args.join(' '));
     const child = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
@@ -182,26 +177,11 @@ function downloadAudio(youtubeUrl, outputPath) {
     child.stderr.on('data', (d) => { err += d.toString(); });
     child.on('error', (e) => reject(new Error(`yt-dlp no disponible: ${e.message}`)));
     child.on('close', (code) => {
-      // Normalize final path to the expected .mp3
-      const candidates = [
-        outputPath,
-        base + '.mp3',
-        base + '.m4a',
-        base + '.webm',
-        base + '.opus'
-      ];
-      const found = candidates.find((p) => fs.existsSync(p));
-      if (code === 0 && found) {
-        if (found !== outputPath && found.endsWith('.mp3')) {
-          try { fs.renameSync(found, outputPath); } catch (_) {}
-        } else if (found !== outputPath) {
-          // Non-mp3: leave as-is and let caller check outputPath; try copy name
-          try { fs.copyFileSync(found, outputPath); } catch (_) {}
-        }
-        if (fs.existsSync(outputPath)) return resolve(true);
+      if (code === 0 && fs.existsSync(outputPath)) {
+        return resolve(true);
       }
       const tail = (err || out).slice(-500);
-      reject(new Error(`yt-dlp ${code}: ${tail}`));
+      reject(new Error(`yt-dlp exit ${code}: ${tail}`));
     });
   });
 }
@@ -210,6 +190,7 @@ function downloadAudio(youtubeUrl, outputPath) {
 async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
   let artist = defaultArtist;
   let title = rawTitle;
+
   if (rawTitle.includes(' - ')) {
     const parts = rawTitle.split(' - ');
     artist = parts[0].trim();
@@ -219,6 +200,7 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
     artist = parts[0].trim();
     title = parts.slice(1).join('-').trim();
   }
+
   const cleanSongTitle = cleanTitle(title);
   const tempMp3 = path.join('/tmp', `seki_${youtubeId}.mp3`);
   const tempCover = path.join('/tmp', `seki_${youtubeId}.jpg`);
@@ -232,10 +214,14 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
     if (byYt) return byYt;
 
     await downloadAudio(`https://www.youtube.com/watch?v=${youtubeId}`, tempMp3);
-    if (!fs.existsSync(tempMp3)) return null;
+    if (!fs.existsSync(tempMp3)) {
+      console.error(`[Process Error] El archivo ${tempMp3} no existe tras la descarga.`);
+      return null;
+    }
 
     const meta = await fetchiTunesMetadata(artist, cleanSongTitle);
     let coverBuffer = null;
+
     if (meta.coverUrl) {
       try {
         const imgRes = await axios.get(meta.coverUrl, {
@@ -266,37 +252,47 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
     );
 
     const mp3Buffer = fs.readFileSync(tempMp3);
-    await supabase.storage
+    const { error: uploadAudioErr } = await supabase.storage
       .from('audio')
       .upload(`${youtubeId}.mp3`, mp3Buffer, { contentType: 'audio/mpeg', upsert: true });
+
+    if (uploadAudioErr) throw uploadAudioErr;
+
     const { data: audioUrlData } = supabase.storage
       .from('audio')
       .getPublicUrl(`${youtubeId}.mp3`);
 
     let coverPublicUrl = null;
     if (fs.existsSync(tempCover)) {
-      await supabase.storage
+      const { error: uploadCoverErr } = await supabase.storage
         .from('covers')
         .upload(`${youtubeId}.jpg`, fs.readFileSync(tempCover), {
           contentType: 'image/jpeg',
           upsert: true
         });
-      const { data: coverUrlData } = supabase.storage
-        .from('covers')
-        .getPublicUrl(`${youtubeId}.jpg`);
-      coverPublicUrl = coverUrlData.publicUrl;
+
+      if (!uploadCoverErr) {
+        const { data: coverUrlData } = supabase.storage
+          .from('covers')
+          .getPublicUrl(`${youtubeId}.jpg`);
+        coverPublicUrl = coverUrlData.publicUrl;
+      }
     }
 
     const durationSec = meta.durationMs ? Math.round(meta.durationMs / 1000) : 180;
+    
+    // Objeto identico al esquema utilizado en seki.js
     const newSong = {
       youtube_id: youtubeId,
+      isrc: meta.isrc,
       title: cleanSongTitle,
       artist,
       album: meta.album,
       duration_seconds: durationSec,
-      duration: durationSec,
       audio_url: audioUrlData.publicUrl,
       cover_url: coverPublicUrl,
+      animated_cover_url: meta.animatedCoverUrl,
+      lyrics_text: `[00:10.00] Letras de ${cleanSongTitle} por ${artist}\n[00:30.00] Sincronización Seki Automática`,
       genre: meta.genre,
       release_year: meta.year,
       source_platform: 'youtube'
@@ -309,24 +305,13 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       .single();
 
     if (dbErr) {
-      const minimal = {
-        title: cleanSongTitle,
-        artist,
-        audio_url: audioUrlData.publicUrl,
-        cover_url: coverPublicUrl,
-        youtube_id: youtubeId
-      };
-      const { data: ins2, error: e2 } = await supabase
-        .from('songs')
-        .insert([minimal])
-        .select()
-        .single();
-      if (e2) throw e2;
-      return ins2;
+      console.error('[DB Insert Error]:', dbErr);
+      throw dbErr;
     }
+
     return inserted;
   } catch (err) {
-    console.error('processAndUploadSong:', err.message);
+    console.error('processAndUploadSong catch:', err.message || err);
     return null;
   } finally {
     try { if (fs.existsSync(tempMp3)) fs.unlinkSync(tempMp3); } catch (_) {}
@@ -336,7 +321,6 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
 
 // --- Rutas del Servidor ---
 
-// Ruta Raíz
 app.get('/', (_req, res) => {
   res.json({
     service: 'seki',
@@ -345,12 +329,10 @@ app.get('/', (_req, res) => {
   });
 });
 
-// Verificación de salud
 app.get('/health', (_, res) => {
   res.json({ ok: true, service: 'seki', node: process.version, ts: Date.now() });
 });
 
-// Obtener canciones de la base de datos
 app.get('/api/songs', auth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
   const { data, error } = await supabase
@@ -362,7 +344,6 @@ app.get('/api/songs', auth, async (req, res) => {
   res.json({ source: 'database', count: data?.length || 0, results: data || [] });
 });
 
-// Búsqueda (Texto o Enlace directo -> Descarga bajo demanda)
 app.get('/api/search', auth, async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.status(400).json({ error: 'Parámetro q requerido' });
@@ -370,9 +351,7 @@ app.get('/api/search', auth, async (req, res) => {
   try {
     const ytId = extractYoutubeId(query);
 
-    // --- CASO 1: Si se proporcionó un enlace o ID directo de YouTube ---
     if (ytId) {
-      // 1. Verificar si el video ya existe en Supabase por youtube_id
       const { data: existing } = await supabase
         .from('songs')
         .select('*')
@@ -383,7 +362,6 @@ app.get('/api/search', auth, async (req, res) => {
         return res.json({ source: 'database', results: [existing] });
       }
 
-      // 2. Si no existe, obtener metadatos desde la API de YouTube v3
       console.log(`[on-demand link] ${ytId}`);
       const info = await getVideoDetails(ytId);
 
@@ -403,7 +381,6 @@ app.get('/api/search', auth, async (req, res) => {
       return res.json({ source: 'downloaded_on_demand', results: [song] });
     }
 
-    // --- CASO 2: Búsqueda por texto tradicional ---
     const { data: existing } = await supabase
       .from('songs')
       .select('*')
@@ -435,7 +412,6 @@ app.get('/api/search', auth, async (req, res) => {
   }
 });
 
-// Ingesta asíncrona por artista
 app.post('/api/ingest', auth, async (req, res) => {
   const artist = (req.query.artist || req.body?.artist || '').trim();
   const limit = Math.min(parseInt(req.query.limit || req.body?.limit || '5', 10), 10);
@@ -455,7 +431,6 @@ app.post('/api/ingest', auth, async (req, res) => {
   });
 });
 
-// Keep-alive para despliegues en Render
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_EXTERNAL_URL) {
   setInterval(() => {

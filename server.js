@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://esjoifsjljvymttinyhj.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || '';
 const API_SECRET = process.env.API_SECRET || '';
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyCYxGyZOLyOC9fD5PTTCVuuQ0xM1QTKido';
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -171,9 +171,10 @@ async function fetchiTunesMetadata(artist, title) {
   };
 }
 
+// --- INTEGACIÓN YOUTUBE DATA API V3 ---
 async function ytApiSearch(query, limit = 1) {
   if (!YOUTUBE_API_KEY) {
-    console.warn('⚠️ [YouTube API] YOUTUBE_API_KEY no encontrada.');
+    console.warn('⚠️ [YouTube API] Variable YOUTUBE_API_KEY no configurada.');
     return [];
   }
   try {
@@ -193,7 +194,10 @@ async function ytApiSearch(query, limit = 1) {
 }
 
 async function getVideoDetails(videoId) {
-  if (!YOUTUBE_API_KEY) return null;
+  if (!YOUTUBE_API_KEY) {
+    console.warn('⚠️ [YouTube API] Variable YOUTUBE_API_KEY no configurada.');
+    return null;
+  }
   try {
     const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${YOUTUBE_API_KEY}`;
     const res = await axios.get(url, { timeout: 8000 });
@@ -211,27 +215,26 @@ async function getVideoDetails(videoId) {
   return null;
 }
 
+// --- DESCARGA CON YT-DLP ---
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
-    // Busca cookies.txt directamente en la raíz de la carpeta del proyecto
+    // Detecta cookies.txt en la raíz del proyecto
     const cookiesPath = path.join(__dirname, 'cookies.txt');
     
     const args = [
-      '-f', 'ba/b', // Permite cualquier formato de audio de YouTube (Opus, WebM, M4A)
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
       '-o', outputPath,
       '--no-playlist',
       '--no-warnings',
-      '--extractor-args', 'youtube:player_client=ios,web',
       youtubeUrl
     ];
 
     if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 10) {
       args.push('--cookies', cookiesPath);
     } else {
-      console.warn('⚠️ [yt-dlp] No se encontró cookies.txt válido en la raíz.');
+      console.warn('⚠️ [yt-dlp] No se detectó un archivo cookies.txt válido en la raíz.');
     }
 
     console.log('⚙️ [yt-dlp Executing]:', args.join(' '));
@@ -374,7 +377,7 @@ async function processAndUploadSong(youtubeId, rawTitle, defaultArtist) {
       throw dbErr;
     }
 
-    console.log(`✅ [EXITO] Canción procesada y publicada en DB: ${cleanSongTitle}`);
+    console.log(`✅ [ÉXITO] Canción procesada y publicada en DB: ${cleanSongTitle}`);
     return inserted;
   } catch (err) {
     console.error('❌ [processAndUploadSong ERROR]:', err.message || err);
@@ -480,7 +483,7 @@ app.get('/api/search', auth, async (req, res) => {
       );
 
       if (!song) {
-        return res.status(500).json({ error: 'No se pudo procesar el enlace (yt-dlp o storage falló). Revisa logs del servidor.', results: [] });
+        return res.status(500).json({ error: 'No se pudo procesar el enlace. Revisa logs del servidor.', results: [] });
       }
       return res.json({ source: 'downloaded_on_demand', results: [song] });
     }
@@ -503,7 +506,7 @@ app.get('/api/search', auth, async (req, res) => {
     const song = await processAndUploadSong(v.id, v.title || query, v.uploader || 'Artista');
 
     if (!song) {
-      return res.status(500).json({ error: 'No se pudo procesar (yt-dlp o storage falló). Revisa logs del servidor.', results: [] });
+      return res.status(500).json({ error: 'No se pudo procesar. Revisa logs del servidor.', results: [] });
     }
     return res.json({ source: 'downloaded_on_demand', results: [song] });
 

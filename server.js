@@ -30,7 +30,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY || 'missing', {
 
 app.use(express.json());
 
-// Middleware con Logging en Terminal para el Cliente
+// Middleware con Logging en Terminal
 app.use((req, res, next) => {
   const start = Date.now();
   console.log(`\n📥 [REQUEST] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
@@ -213,9 +213,11 @@ async function getVideoDetails(videoId) {
 
 function downloadAudio(youtubeUrl, outputPath) {
   return new Promise((resolve, reject) => {
+    // Busca cookies.txt directamente en la raíz de la carpeta del proyecto
     const cookiesPath = path.join(__dirname, 'cookies.txt');
+    
     const args = [
-      '-f', 'ba[ext=m4a]/b/best',
+      '-f', 'ba/b', // Permite cualquier formato de audio de YouTube (Opus, WebM, M4A)
       '--extract-audio',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
@@ -228,6 +230,8 @@ function downloadAudio(youtubeUrl, outputPath) {
 
     if (fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 10) {
       args.push('--cookies', cookiesPath);
+    } else {
+      console.warn('⚠️ [yt-dlp] No se encontró cookies.txt válido en la raíz.');
     }
 
     console.log('⚙️ [yt-dlp Executing]:', args.join(' '));
